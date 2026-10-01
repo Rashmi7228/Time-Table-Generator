@@ -1,11 +1,20 @@
 import os
 import sqlite3
 import secrets
+import re
+from io import BytesIO
 from functools import wraps
-from flask import Flask, request, jsonify, send_from_directory, session
+from xml.sax.saxutils import escape
+from flask import Flask, request, jsonify, send_from_directory, send_file, session
 from db import init_db, get_conn, hash_pw, DAYS, PERIODS, add_notification, get_notifications, get_break_meta, get_break_periods, set_break_config, find_teacher_conflict, find_class_conflict, find_room_conflict, find_classroom_conflict, find_class_record_conflict, TEACHER_UNAVAILABLE_MESSAGE, CLASS_UNAVAILABLE_MESSAGE, ROOM_UNAVAILABLE_MESSAGE, CLASSROOM_UNAVAILABLE_MESSAGE
 from generator import generate_timetable_for_class
 from datetime import datetime
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 app.secret_key = os.environ.get("SESSION_SECRET", secrets.token_hex(32))
@@ -19,6 +28,154 @@ def row_to_dict(row):
 
 def rows_to_list(rows):
     return [row_to_dict(r) for r in rows]
+
+
+def timetable_pdf_response(title, entries, download):
+    buffer = BytesIO()
+    page_size = landscape(A4)
+    margin = 8 * mm
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=page_size,
+        leftMargin=margin,
+        rightMargin=margin,
+        topMargin=margin,
+        bottomMargin=margin,
+        title=f"Time Table - {title}",
+        author="College Timetable System",
+    )
+    title_style = ParagraphStyle(
+        "TimetableTitle", fontName="Helvetica-Bold", fontSize=17,
+        leading=20, alignment=TA_CENTER, spaceAfter=3 * mm,
+    )
+    subtitle_style = ParagraphStyle(
+        "TimetableSubtitle", fontName="Helvetica-Bold", fontSize=10,
+        leading=13, alignment=TA_CENTER, spaceAfter=4 * mm,
+    )
+    header_style = ParagraphStyle(
+        "TimetableHeader", fontName="Helvetica-Bold", fontSize=7,
+        leading=8, alignment=TA_CENTER,
+    )
+    cell_style = ParagraphStyle(
+        "TimetableCell", fontName="Helvetica", fontSize=6.5,
+        leading=8, alignment=TA_CENTER, splitLongWords=True,
+    )
+    day_style = ParagraphStyle(
+        "TimetableDay", fontName="Helvetica-Bold", fontSize=7,
+        leading=9, alignment=TA_CENTER,
+    )
+    break_style = ParagraphStyle(
+        "TimetableBreak", fontName="Helvetica-Bold", fontSize=7,
+        leading=9, alignment=TA_CENTER,
+    )
+
+    def para(text, style=cell_style):
+        return Paragraph(escape(str(text)), style)
+
+    lookup = {}
+    for entry in entries:
+        lookup.setdefault((entry.get("day"), entry.get("period")), []).append(entry)
+
+    periods = list(PERIODS)
+    break_by_start = {item["start"]: item for item in get_break_meta(periods)}
+    table_data = [[para("Day / Period", header_style), *[para(period, header_style) for period in periods]]]
+    table_styles = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8edf2")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#66717d")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+
+    def signature(items):
+        fields = ("subject_id", "teacher_id", "class_id", "room", "entry_type", "note", "locked")
+        return tuple(sorted(tuple(item.get(field) for field in fields) for item in items))
+
+    for day in DAYS:
+        row_number = len(table_data)
+        row = [para(day, day_style)]
+        period_position = 0
+        while period_position < len(periods):
+            period = periods[period_position]
+            break_def = break_by_start.get(period)
+            if break_def:
+                span = max(1, min(break_def.get("span", 1), len(periods) - period_position))
+                label = break_def.get("label") or "BREAK"
+                row.append(Paragraph(
+                    f"<b>{escape(label)}</b><br/>Break | Duration: {span} {'period' if span == 1 else 'periods'}",
+                    break_style,
+                ))
+                row.extend([""] * (span - 1))
+                if span > 1:
+                    table_styles.append(("SPAN", (period_position + 1, row_number), (period_position + span, row_number)))
+                    table_styles.append(("BACKGROUND", (period_position + 1, row_number), (period_position + span, row_number), colors.HexColor("#f4eedc")))
+                period_position += span
+                continue
+
+            items = lookup.get((day, period), [])
+            span = 1
+            if items and not any(item.get("entry_type") == "break" for item in items):
+                current_signature = signature(items)
+                while period_position + span < len(periods):
+                    next_period = periods[period_position + span]
+                    if next_period in break_by_start:
+                        break
+                    next_items = lookup.get((day, next_period), [])
+                    if not next_items or signature(next_items) != current_signature:
+                        break
+                    span += 1
+
+            cell_lines = []
+            for item in items:
+                entry_type = item.get("entry_type") or "regular"
+                subject = item.get("subject_name") or ("Cancelled" if entry_type == "cancelled" else "Class")
+                lines = [f"<b>{escape(str(subject))}</b>"]
+                if item.get("teacher_name"):
+                    lines.append(f"Teacher: {escape(str(item['teacher_name']))}")
+                if item.get("room"):
+                    lines.append(f"Room: {escape(str(item['room']))}")
+                lines.append(f"Type: {escape(str(entry_type))}")
+                lines.append(f"Duration: {span} {'period' if span == 1 else 'periods'}")
+                if item.get("note"):
+                    lines.append(f"Notes: {escape(str(item['note']))}")
+                cell_lines.append("<br/>".join(lines))
+
+            row.append(Paragraph("<br/><br/>".join(cell_lines) if cell_lines else "—", cell_style))
+            row.extend([""] * (span - 1))
+            if span > 1:
+                table_styles.append(("SPAN", (period_position + 1, row_number), (period_position + span, row_number)))
+            period_position += span
+
+        table_data.append(row)
+
+    available_width = page_size[0] - 2 * margin
+    day_column_width = 18 * mm
+    period_column_width = (available_width - day_column_width) / len(periods)
+    timetable = Table(
+        table_data,
+        colWidths=[day_column_width] + [period_column_width] * len(periods),
+        repeatRows=1,
+        hAlign="LEFT",
+    )
+    timetable.setStyle(TableStyle(table_styles))
+    doc.build([
+        Paragraph("TIME TABLE", title_style),
+        Paragraph(escape(title), subtitle_style),
+        Spacer(1, 2 * mm),
+        timetable,
+    ])
+    buffer.seek(0)
+
+    filename = re.sub(r"[^A-Za-z0-9_-]+", "-", f"Time-Table-{title}").strip("-") + ".pdf"
+    return send_file(
+        buffer,
+        mimetype="application/pdf",
+        as_attachment=download,
+        download_name=filename,
+    )
 
 
 def require_role(role):
@@ -132,6 +289,35 @@ def student_timetable():
     })
 
 
+@app.route("/api/student/timetable/pdf")
+def student_timetable_pdf():
+    semester = request.args.get("semester", type=int)
+    section = request.args.get("section", "").strip().upper()
+    if not semester or not section:
+        return jsonify({"error": "semester and section required"}), 400
+
+    conn = get_conn()
+    cls = conn.execute(
+        "SELECT * FROM classes WHERE semester = ? AND section = ?",
+        (semester, section),
+    ).fetchone()
+    if not cls:
+        conn.close()
+        return jsonify({"error": "Class not found"}), 404
+    rows = conn.execute("""
+        SELECT t.*, s.name AS subject_name, s.code AS subject_code, te.name AS teacher_name
+        FROM timetable t
+        LEFT JOIN subjects s ON s.id = t.subject_id
+        LEFT JOIN teachers te ON te.id = t.teacher_id
+        WHERE t.class_id = ?
+        ORDER BY t.day, t.period
+    """, (cls["id"],)).fetchall()
+    conn.close()
+
+    title = f"Semester: {cls['semester']} | Section: {cls['section']}"
+    return timetable_pdf_response(title, rows_to_list(rows), request.args.get("download") == "1")
+
+
 @app.route("/api/student/notifications")
 def student_notifications():
     semester = request.args.get("semester", type=int)
@@ -166,6 +352,27 @@ def teacher_timetable():
     """, (tid,)).fetchall()
     conn.close()
     return jsonify({"entries": rows_to_list(rows)})
+
+
+@app.route("/api/teacher/timetable/pdf")
+@require_role("teacher")
+def teacher_timetable_pdf():
+    teacher_id = session["user_id"]
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT t.*, s.name AS subject_name, s.code AS subject_code,
+               te.name AS teacher_name, c.semester, c.section
+        FROM timetable t
+        LEFT JOIN subjects s ON s.id = t.subject_id
+        LEFT JOIN teachers te ON te.id = t.teacher_id
+        LEFT JOIN classes c ON c.id = t.class_id
+        WHERE t.teacher_id = ?
+        ORDER BY t.day, t.period
+    """, (teacher_id,)).fetchall()
+    conn.close()
+
+    title = f"Teacher: {session.get('user', '')}"
+    return timetable_pdf_response(title, rows_to_list(rows), request.args.get("download") == "1")
 
 
 @app.route("/api/teacher/notifications")
@@ -790,6 +997,32 @@ def admin_timetable():
     return jsonify({"class": row_to_dict(cls), "entries": entries, "items": entries})
 
 
+@app.route("/api/admin/timetable/pdf")
+@require_role("admin")
+def admin_timetable_pdf():
+    class_id = request.args.get("class_id", type=int)
+    if not class_id:
+        return jsonify({"error": "class_id required"}), 400
+
+    conn = get_conn()
+    cls = conn.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
+    if not cls:
+        conn.close()
+        return jsonify({"error": "Class not found"}), 404
+    rows = conn.execute("""
+        SELECT t.*, s.name AS subject_name, s.code AS subject_code, te.name AS teacher_name
+        FROM timetable t
+        LEFT JOIN subjects s ON s.id = t.subject_id
+        LEFT JOIN teachers te ON te.id = t.teacher_id
+        WHERE t.class_id = ?
+        ORDER BY t.day, t.period
+    """, (class_id,)).fetchall()
+    conn.close()
+
+    title = f"Semester: {cls['semester']} | Section: {cls['section']}"
+    return timetable_pdf_response(title, rows_to_list(rows), request.args.get("download") == "1")
+
+
 @app.route("/api/admin/breaks", methods=["GET", "PUT"])
 @require_role("admin")
 def admin_breaks():
@@ -846,6 +1079,9 @@ def admin_entry():
                 conn.close()
                 return jsonify({"error": "Cannot add entries during break periods."}), 400
             class_id = entry.get("class_id")
+            if not subject_applicable_to_class(conn, entry.get("subject_id"), class_id):
+                conn.close()
+                return jsonify({"error": "This subject is not applicable to the selected semester."}), 400
             day = entry.get("day")
             assignment_teacher_id = subject_teacher_for_class(conn, entry.get("subject_id"), class_id)
             teacher_id = assignment_teacher_id if assignment_teacher_id is not None else entry.get("teacher_id")
@@ -891,6 +1127,13 @@ def admin_entry():
         if period in get_break_periods():
             conn.close()
             return jsonify({"error": "Cannot set break periods as admin entries."}), 400
+        existing_entry = conn.execute(
+            "SELECT class_id FROM timetable WHERE id = ?", (eid,)
+        ).fetchone()
+        validation_class_id = existing_entry["class_id"] if existing_entry else d.get("class_id")
+        if not subject_applicable_to_class(conn, d.get("subject_id"), validation_class_id):
+            conn.close()
+            return jsonify({"error": "This subject is not applicable to the selected semester."}), 400
         assignment_teacher_id = subject_teacher_for_class(conn, d.get("subject_id"), d.get("class_id"))
         teacher_id = assignment_teacher_id if assignment_teacher_id is not None else d.get("teacher_id")
         if find_teacher_conflict(conn, teacher_id, d.get("day"), period, eid):
@@ -945,6 +1188,28 @@ def subject_teacher_for_class(conn, subject_id, class_id):
         WHERE sa.subject_id = ? AND c.id = ?
     """, (subject_id, class_id)).fetchone()
     return return_value["teacher_id"] if return_value else None
+
+
+def subject_applicable_to_class(conn, subject_id, class_id):
+    if not subject_id:
+        return True
+    cls = conn.execute("SELECT semester FROM classes WHERE id = ?", (class_id,)).fetchone()
+    subject = conn.execute("SELECT semester FROM subjects WHERE id = ?", (subject_id,)).fetchone()
+    if not cls or not subject:
+        return False
+    assignment = conn.execute("""
+        SELECT 1
+        FROM subject_assignments
+        WHERE subject_id = ? AND semester = ?
+        LIMIT 1
+    """, (subject_id, cls["semester"])).fetchone()
+    if assignment:
+        return True
+    has_assignments = conn.execute(
+        "SELECT 1 FROM subject_assignments WHERE subject_id = ? LIMIT 1",
+        (subject_id,),
+    ).fetchone()
+    return not has_assignments and subject["semester"] == cls["semester"]
 
 
 if __name__ == "__main__":

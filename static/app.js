@@ -140,6 +140,7 @@ async function init() {
 
 function route() {
   const { route, params } = parseHash();
+  document.body.classList.remove("print-timetable");
   renderNav();
   switch (route) {
     case "home": return renderHome();
@@ -187,7 +188,7 @@ async function renderStudent(params) {
 
   const semInput = el("input", { type: "number", min: "1", max: "7", value: params.semester || "1" });
   const secInput = el("input", { type: "text", placeholder: "A", maxlength: "5", value: params.section || "" });
-  const form = el("div", { class: "panel" }, [
+  const form = el("div", { class: "panel student-controls" }, [
     el("div", { class: "row" }, [
       el("div", { class: "field" }, [el("label", {}, "Semester"), semInput]),
       el("div", { class: "field" }, [el("label", {}, "Section"), secInput]),
@@ -212,10 +213,20 @@ async function renderStudent(params) {
   if (params.semester && params.section) {
     try {
       const data = await api(`/api/student/timetable?semester=${params.semester}&section=${params.section}`);
+      document.body.classList.add("print-timetable");
       // If `today` param is present, render only today's timetable
       const dayName = new Date().toLocaleDateString(undefined, { weekday: "long" });
-      const ttPanel = el("div", { class: "panel" }, [
-        el("h2", {}, `Sem ${data.class.semester} · Section ${data.class.section}${data.class.room ? " · Room " + data.class.room : ""}`),
+      const ttPanel = el("div", { class: "panel print-target student-timetable" }, [
+        el("h1", { class: "print-only timetable-print-title" }, "TIME TABLE"),
+        el("h2", { class: "timetable-class" }, `Semester: ${ordinalSemester(data.class.semester)} | Section: ${data.class.section}`),
+        data.class.room ? el("p", { class: "timetable-room" }, `Room: ${data.class.room}`) : null,
+        el("div", { class: "timetable-actions screen-only" }, [
+          el("button", { class: "btn secondary", onclick: () => window.print() }, "Print"),
+          el("button", {
+            class: "btn secondary",
+            onclick: () => openPdfExport(`/api/student/timetable/pdf?semester=${data.class.semester}&section=${encodeURIComponent(data.class.section)}`),
+          }, "Export PDF"),
+        ]),
         params.today ? renderTimetableForDay(data.entries, dayName) : renderTimetableGrid(data.entries),
       ]);
       app.appendChild(ttPanel);
@@ -226,6 +237,47 @@ async function renderStudent(params) {
       app.appendChild(el("div", { class: "panel empty-state" }, e.message));
     }
   }
+}
+
+function ordinalSemester(semester) {
+  const number = Number(semester);
+  const remainder = number % 100;
+  const suffix = remainder >= 11 && remainder <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[number % 10] || "th");
+  return `${number}${suffix} Semester`;
+}
+
+function openPdfExport(url) {
+  let close;
+  close = openModal("Export Timetable PDF", [
+    el("p", {}, "Would you like to download the PDF or view it now?"),
+    el("div", { class: "row pdf-export-actions" }, [
+      el("button", { class: "btn secondary", onclick: () => close() }, "Cancel"),
+      el("button", { class: "btn secondary", onclick: () => {
+        const downloadUrl = `${url}${url.includes("?") ? "&" : "?"}download=1`;
+        const link = el("a", { href: downloadUrl, download: "" });
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        close();
+      } }, "Download PDF"),
+      el("button", { class: "btn", onclick: () => {
+        window.open(url, "_blank", "noopener");
+        close();
+      } }, "View PDF"),
+    ]),
+  ]);
+}
+
+function appendPrintDetails(cell, entry, duration, includeContext = false) {
+  const details = [
+    includeContext && Number.isFinite(Number(entry.semester)) && entry.section && `Class: Sem ${entry.semester} | Section ${entry.section}`,
+    includeContext && entry.teacher_name && `Teacher: ${entry.teacher_name}`,
+    includeContext && entry.room && `Room: ${entry.room}`,
+    `Type: ${entry.entry_type || "regular"}`,
+    `Duration: ${duration} ${duration === 1 ? "period" : "periods"}`,
+    entry.note && `Note: ${entry.note}`,
+  ].filter(Boolean).join(" | ");
+  cell.appendChild(el("div", { class: "print-only print-details" }, details));
 }
 
 function renderTimetableGrid(entries) {
@@ -255,6 +307,7 @@ function renderTimetableGrid(entries) {
         const colspan = Math.max(1, Math.abs(endIndex - startIndex) + 1);
         const cell = el("td", { class: "cell break", colspan: String(colspan) });
         cell.appendChild(el("div", { class: "sub" }, breakCellText(period)));
+        cell.appendChild(el("div", { class: "print-only print-details" }, `Break | Duration: ${colspan} ${colspan === 1 ? "period" : "periods"}`));
         row.appendChild(cell);
         periodIndex += colspan;
         continue;
@@ -276,6 +329,7 @@ function renderTimetableGrid(entries) {
             c.appendChild(el("div", { class: "sub" }, subText));
             if (it.teacher_name) c.appendChild(el("div", { class: "tea" }, it.teacher_name));
             if (it.room) c.appendChild(el("div", { class: "room" }, it.room));
+            appendPrintDetails(c, it, span);
             if (it.entry_type !== "regular") {
               const badgeText = it.entry_type;
               c.appendChild(el("span", { class: "badge " + it.entry_type }, badgeText));
@@ -320,6 +374,7 @@ function renderTimetableForDay(entries, dayName) {
       const colspan = Math.max(1, Math.abs(endIndex - startIndex) + 1);
       const cell = el("td", { class: "cell break", colspan: String(colspan) });
       cell.appendChild(el("div", { class: "sub" }, breakCellText(period)));
+      cell.appendChild(el("div", { class: "print-only print-details" }, `Break | Duration: ${colspan} ${colspan === 1 ? "period" : "periods"}`));
       row.appendChild(cell);
       periodIndex += colspan;
       continue;
@@ -342,6 +397,7 @@ function renderTimetableForDay(entries, dayName) {
           c.appendChild(el("div", { class: "sub" }, subText));
           if (it.teacher_name) c.appendChild(el("div", { class: "tea" }, it.teacher_name));
           if (it.room) c.appendChild(el("div", { class: "room" }, it.room));
+          appendPrintDetails(c, it, span);
           if (it.entry_type !== "regular") {
             const badgeText = it.entry_type;
             c.appendChild(el("span", { class: "badge " + it.entry_type }, badgeText));
@@ -429,20 +485,31 @@ async function renderTeacherPanel() {
   ]);
   app.appendChild(controls);
 
-  const ttHolder = el("div");
+  const ttHolder = el("div", { class: "print-context" });
   app.appendChild(ttHolder);
 
   const refresh = async () => {
     const data = await api("/api/teacher/timetable");
+    document.body.classList.add("print-timetable");
     ttHolder.innerHTML = "";
     if (viewToggle.value === "weekly") {
-      ttHolder.appendChild(el("div", { class: "panel" }, [
-        el("h2", {}, "Weekly Timetable"),
+      ttHolder.appendChild(el("div", { class: "panel print-target teacher-timetable" }, [
+        el("h1", { class: "print-only timetable-print-title" }, "TEACHER TIME TABLE"),
+        el("h2", { class: "timetable-class" }, `Teacher: ${SESSION.user} | Weekly Schedule`),
+        el("div", { class: "timetable-actions screen-only" }, [
+          el("button", { class: "btn secondary", onclick: () => window.print() }, "Print"),
+          el("button", { class: "btn secondary", onclick: () => openPdfExport("/api/teacher/timetable/pdf") }, "Export PDF"),
+        ]),
         renderTeacherWeekly(data.entries),
       ]));
     } else {
-      ttHolder.appendChild(el("div", { class: "panel" }, [
-        el("h2", {}, "Monthly View (List)"),
+      ttHolder.appendChild(el("div", { class: "panel print-target teacher-timetable" }, [
+        el("h1", { class: "print-only timetable-print-title" }, "TEACHER TIME TABLE"),
+        el("h2", { class: "timetable-class" }, `Teacher: ${SESSION.user} | Monthly View (List)`),
+        el("div", { class: "timetable-actions screen-only" }, [
+          el("button", { class: "btn secondary", onclick: () => window.print() }, "Print"),
+          el("button", { class: "btn secondary", onclick: () => openPdfExport("/api/teacher/timetable/pdf") }, "Export PDF"),
+        ]),
         renderTeacherList(sortEntries(data.entries, sortSel.value), refresh),
       ]));
     }
@@ -530,6 +597,7 @@ function renderTeacherWeekly(entries) {
         const colspan = Math.max(1, Math.abs(endIndex - startIndex) + 1);
         const td = el("td", { class: "cell break", colspan: String(colspan) });
         td.appendChild(el("div", { class: "sub" }, breakCellText(period)));
+        td.appendChild(el("div", { class: "print-only print-details" }, `Break | Duration: ${colspan} ${colspan === 1 ? "period" : "periods"}`));
         td.style.cursor = "pointer";
         row.appendChild(td);
         periodIndex += colspan;
@@ -549,6 +617,7 @@ function renderTeacherWeekly(entries) {
         } else {
           c.appendChild(el("div", { class: "sub" }, it.subject_name || "—"));
           c.appendChild(el("div", { class: "tea" }, `Sem ${it.semester} · ${it.section}`));
+          appendPrintDetails(c, it, span, true);
           if (it.entry_type !== "regular") {
             const badgeText = it.entry_type;
             c.appendChild(el("span", { class: "badge " + it.entry_type }, badgeText));
@@ -574,10 +643,28 @@ function renderTeacherList(entries, refresh) {
   const tbl = el("table");
   tbl.appendChild(el("thead", {}, el("tr", {}, [
     el("th", {}, "Day"), el("th", {}, "Period"), el("th", {}, "Subject"),
-    el("th", {}, "Class"), el("th", {}, "Type"), el("th", {}, "Actions"),
+    el("th", {}, "Class"), el("th", {}, "Type"),
+    el("th", { class: "print-only print-table-cell" }, "Duration"),
+    el("th", { class: "print-only print-table-cell" }, "Room"),
+    el("th", { class: "print-only print-table-cell" }, "Notes"),
+    el("th", { class: "screen-only" }, "Actions"),
   ])));
   const tb = el("tbody");
+  const lookup = {};
+  for (const entry of entries) {
+    const key = `${entry.day}|${entry.period}`;
+    (lookup[key] = lookup[key] || []).push(entry);
+  }
   for (const e of entries) {
+    let startIndex = META.periods.indexOf(e.period);
+    const signature = entriesSignature(lookup[`${e.day}|${e.period}`] || []);
+    while (startIndex > 0 && !isBreakPeriod(META.periods[startIndex - 1])) {
+      const previousPeriod = META.periods[startIndex - 1];
+      const previousItems = lookup[`${e.day}|${previousPeriod}`] || [];
+      if (!previousItems.length || entriesSignature(previousItems) !== signature) break;
+      startIndex--;
+    }
+    const duration = getEntryCellSpan(lookup, e.day, startIndex);
     tb.appendChild(el("tr", {}, [
       el("td", {}, e.day),
       el("td", {}, e.period),
@@ -587,7 +674,10 @@ function renderTeacherList(entries, refresh) {
         el("span", { class: "badge " + e.entry_type }, e.entry_type),
         e.locked ? el("span", { class: "badge lock" }, "Locked") : null,
       ]),
-      el("td", {}, [
+      el("td", { class: "print-only print-table-cell" }, `${duration} ${duration === 1 ? "period" : "periods"}`),
+      el("td", { class: "print-only print-table-cell" }, e.room || "—"),
+      el("td", { class: "print-only print-table-cell" }, e.note || "—"),
+      el("td", { class: "screen-only" }, [
         el("button", { class: "btn small secondary", onclick: () => openTeacherActionModal(e, refresh) }, "Manage"),
       ]),
     ]));
@@ -699,7 +789,7 @@ async function renderAdminPanel(params) {
   }, t)));
   app.appendChild(tabBar);
 
-  const content = el("div");
+  const content = el("div", { class: "print-context" });
   app.appendChild(content);
   if (active === "Teachers") await adminTeachers(content);
   else if (active === "Subjects") await adminSubjects(content);
@@ -1038,20 +1128,27 @@ async function adminTimetables(content) {
           toast(res.message, "success"); refresh();
         } catch (e) { toast(e.message, "error"); }
       } }, "Auto-Generate"),
-      el("button", { class: "btn secondary", onclick: () => openAdminEntryModal(parseInt(classSel.value), null, refresh) }, "+ Add Entry"),
+      el("button", { class: "btn secondary", onclick: () => openAdminEntryModal(parseInt(classSel.value), null, refresh, classes.find(c => c.id === parseInt(classSel.value))?.semester) }, "+ Add Entry"),
     ]),
   ]);
   content.appendChild(ctrlPanel);
 
-  const ttHolder = el("div");
+  const ttHolder = el("div", { class: "print-context" });
   content.appendChild(ttHolder);
 
   const refresh = async () => {
     const data = await api(`/api/admin/timetable?class_id=${classSel.value}`);
+    document.body.classList.add("print-timetable");
     ttHolder.innerHTML = "";
-    ttHolder.appendChild(el("div", { class: "panel" }, [
-      el("h2", {}, `Timetable · Sem ${data.class.semester} · Section ${data.class.section}`),
-      renderAdminTimetable(data.entries, parseInt(classSel.value), refresh),
+    ttHolder.appendChild(el("div", { class: "panel print-target admin-timetable" }, [
+      el("h1", { class: "print-only timetable-print-title" }, "TIME TABLE"),
+      el("h2", { class: "timetable-class" }, `Semester: ${ordinalSemester(data.class.semester)} | Section: ${data.class.section}`),
+      data.class.room ? el("p", { class: "timetable-room" }, `Room: ${data.class.room}`) : null,
+      el("div", { class: "timetable-actions screen-only" }, [
+        el("button", { class: "btn secondary", onclick: () => window.print() }, "Print"),
+        el("button", { class: "btn secondary", onclick: () => openPdfExport(`/api/admin/timetable/pdf?class_id=${classSel.value}`) }, "Export PDF"),
+      ]),
+      renderAdminTimetable(data.entries, parseInt(classSel.value), refresh, data.class.semester),
     ]));
   };
   classSel.onchange = refresh;
@@ -1162,7 +1259,7 @@ async function adminLeaves(content) {
   content.appendChild(panel);
 }
 
-function renderAdminTimetable(entries, classId, refresh) {
+function renderAdminTimetable(entries, classId, refresh, semester) {
   const wrap = el("div", { class: "tt-wrap" });
   const table = el("table", { class: "tt" });
   const thead = el("thead");
@@ -1185,7 +1282,8 @@ function renderAdminTimetable(entries, classId, refresh) {
         const colspan = Math.max(1, Math.abs(endIndex - startIndex) + 1);
         const td = el("td", { class: "cell break", colspan: String(colspan), style: "cursor:pointer" });
         td.appendChild(el("div", { class: "sub" }, breakCellText(period)));
-        td.onclick = () => openAdminEntryModal(classId, { day, period: breakDef.start, entry_type: "break", note: breakDef.label }, refresh);
+        td.appendChild(el("div", { class: "print-only print-details" }, `Break | Duration: ${colspan} ${colspan === 1 ? "period" : "periods"}`));
+        td.onclick = () => openAdminEntryModal(classId, { day, period: breakDef.start, entry_type: "break", note: breakDef.label }, refresh, semester);
         row.appendChild(td);
         periodIndex += colspan;
         continue;
@@ -1196,7 +1294,7 @@ function renderAdminTimetable(entries, classId, refresh) {
       const td = el("td", span > 1 ? { colspan: String(span) } : {});
       if (!items.length) {
         const empty = el("div", { class: "cell empty", style: "cursor:pointer" }, "+ Add");
-        empty.onclick = () => openAdminEntryModal(classId, { day, period }, refresh);
+        empty.onclick = () => openAdminEntryModal(classId, { day, period }, refresh, semester);
         td.appendChild(empty);
       } else {
         const wrapper = el("div", { class: items.length > 1 ? "cell-multi" : "cell" });
@@ -1207,12 +1305,13 @@ function renderAdminTimetable(entries, classId, refresh) {
           } else {
             c.appendChild(el("div", { class: "sub" }, it.subject_name || "—"));
             if (it.teacher_name) c.appendChild(el("div", { class: "tea" }, it.teacher_name));
+            appendPrintDetails(c, it, span, true);
             if (it.entry_type !== "regular") {
               const badgeText = it.entry_type;
               c.appendChild(el("span", { class: "badge " + it.entry_type }, badgeText));
             }
           }
-          c.onclick = () => openAdminEntryModal(classId, it, refresh);
+          c.onclick = () => openAdminEntryModal(classId, it, refresh, semester);
           wrapper.appendChild(c);
         }
         td.appendChild(wrapper);
@@ -1227,7 +1326,7 @@ function renderAdminTimetable(entries, classId, refresh) {
   return wrap;
 }
 
-async function openAdminEntryModal(classId, entry, refresh) {
+async function openAdminEntryModal(classId, entry, refresh, semester) {
   const [subs, teachers] = await Promise.all([api("/api/admin/subjects"), api("/api/admin/teachers")]);
   const isEdit = entry && entry.id;
 
@@ -1258,8 +1357,13 @@ async function openAdminEntryModal(classId, entry, refresh) {
   }
   periodSel.addEventListener("change", () => { rebuildDurationOptions(); updatePreview(); });
   durationSel.addEventListener("change", updatePreview);
+  const subjectsForSemester = subs.items.filter(subject => {
+    const assignments = subject.assignments || [];
+    return assignments.some(assignment => Number(assignment.semester) === Number(semester))
+      || (!assignments.length && Number(subject.semester) === Number(semester));
+  });
   const subSel = el("select", {}, [el("option", { value: "" }, "— Subject —"),
-    ...subs.items.map(s => el("option", { value: s.id, selected: entry?.subject_id === s.id ? "selected" : null }, `${s.code} · ${s.name}`))]);
+    ...subjectsForSemester.map(s => el("option", { value: s.id, selected: entry?.subject_id === s.id ? "selected" : null }, `${s.code} · ${s.name}`))]);
 
   // Live preview showing selected time + subject (e.g. "09:00–09:55 | CS101 · Computer Science")
   const previewText = el("div", { class: "preview-text" }, "");
