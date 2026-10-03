@@ -43,7 +43,6 @@ h2{font-size:20px;margin:0 0 12px}
 .panel h2{display:flex;justify-content:space-between;align-items:center}
 .timetable-actions{display:flex;justify-content:flex-end;gap:8px;margin:0 0 14px}
 .timetable-class{display:block!important}
-.timetable-room{margin:-6px 0 14px;color:var(--muted);font-size:13px}
 .print-only{display:none}
 .row{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
 .field{display:flex;flex-direction:column;gap:6px;flex:1;min-width:160px}
@@ -162,7 +161,6 @@ table.tt th{background:var(--panel-2)}
   body.print-timetable .print-table-cell{display:table-cell!important}
   body.print-timetable .timetable-print-title{font-size:20pt;margin:0 0 4mm;text-align:center;color:#111}
   body.print-timetable .print-target .timetable-class{font-size:13pt;margin:0 0 2mm;color:#111}
-  body.print-timetable .timetable-room{margin:0 0 3mm;color:#111}
   body.print-timetable .print-target .tt-wrap{overflow:visible}
   body.print-timetable .print-target table{width:100%;border-collapse:collapse;font-size:8pt}
   body.print-timetable .print-target table.tt{min-width:0;table-layout:fixed;break-inside:auto}
@@ -171,12 +169,17 @@ table.tt th{background:var(--panel-2)}
   body.print-timetable .print-target table tr{break-inside:avoid}
   body.print-timetable .print-target .cell{height:auto;min-height:30px;color:#111}
   body.print-timetable .print-target .cell .sub{font-size:9pt;color:#111;white-space:normal;overflow:visible;text-overflow:clip}
-  body.print-timetable .print-target .cell .tea,body.print-timetable .print-target .cell .room{font-size:7.5pt;color:#222}
+  body.print-timetable .print-target .cell:not(.break) > .sub{display:none!important}
+  body.print-timetable .print-target .cell .tea,body.print-timetable .print-target .cell .room,body.print-timetable .print-target .print-details,body.print-timetable .print-target .badge{display:none!important}
+  body.print-timetable .print-target .print-subject{font-size:9pt;line-height:1.25;color:#111;text-align:center}
   body.print-timetable .print-target .cell-multi{height:auto;overflow:visible;padding:2px}
   body.print-timetable .print-target .cell-multi .cell{min-width:0}
   body.print-timetable .print-target .cell-multi .cell + .cell{padding-left:3px;border-color:#777}
   body.print-timetable .print-target .cell.break{background:#f1f1f1!important;color:#111;border-color:#555}
   body.print-timetable .print-target .cell.break .sub{color:#111;font-size:8pt}
-  body.print-timetable .print-target .print-details{margin-top:2px;font-size:6.5pt;line-height:1.2;font-weight:400;color:#222}
-  body.print-timetable .print-target .badge{border:1px solid #777;background:transparent!important;color:#111!important}
+  body.print-timetable .print-target .timetable-subjects{margin-top:5mm;break-inside:avoid}
+  body.print-timetable .print-target .timetable-subjects h2{font-size:11pt;margin:0 0 2mm;text-align:center;color:#111}
+  body.print-timetable .print-target .timetable-subjects table{width:auto;max-width:100%;margin:0 auto;border-collapse:collapse;font-size:8pt}
+  body.print-timetable .print-target .timetable-subjects th,body.print-timetable .print-target .timetable-subjects td{height:auto;min-height:0;padding:4px;border:1px solid #555;color:#111}
+  body.print-timetable .print-target .timetable-subjects th{background:#e8e8e8!important;font-size:7.5pt}
 }

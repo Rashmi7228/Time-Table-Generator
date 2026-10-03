@@ -30,7 +30,24 @@ def rows_to_list(rows):
     return [row_to_dict(r) for r in rows]
 
 
-def timetable_pdf_response(title, entries, download):
+def class_subject_details(conn, cls):
+    return rows_to_list(conn.execute("""
+        SELECT s.code AS subject_code, s.name AS subject_name, t.name AS teacher_name
+        FROM subjects s
+        LEFT JOIN subject_assignments sa
+          ON sa.subject_id = s.id
+         AND sa.semester = ?
+         AND sa.section = ?
+        LEFT JOIN teachers t ON t.id = COALESCE(sa.teacher_id, s.teacher_id)
+        WHERE sa.id IS NOT NULL
+           OR (s.semester = ? AND NOT EXISTS (
+                SELECT 1 FROM subject_assignments sa_any WHERE sa_any.subject_id = s.id
+           ))
+        ORDER BY s.code
+    """, (cls["semester"], cls["section"], cls["semester"])).fetchall())
+
+
+def timetable_pdf_response(title, entries, download, class_info=None, subjects=None):
     buffer = BytesIO()
     page_size = landscape(A4)
     margin = 8 * mm
@@ -72,6 +89,34 @@ def timetable_pdf_response(title, entries, download):
     def para(text, style=cell_style):
         return Paragraph(escape(str(text)), style)
 
+    def subject_details_table(subjects):
+        rows = [[
+            para("Subject Code", header_style),
+            para("Subject Name", header_style),
+            para("Subject Teacher", header_style),
+        ]]
+        rows.extend([
+            para(subject.get("subject_code") or "—"),
+            para(subject.get("subject_name") or "—"),
+            para(subject.get("teacher_name") or "—"),
+        ] for subject in subjects or [])
+        table = Table(
+            rows,
+            colWidths=[28 * mm, 65 * mm, 48 * mm],
+            repeatRows=1,
+            hAlign="CENTER",
+        )
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#e8edf2")),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#66717d")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        return table
+
     lookup = {}
     for entry in entries:
         lookup.setdefault((entry.get("day"), entry.get("period")), []).append(entry)
@@ -104,10 +149,7 @@ def timetable_pdf_response(title, entries, download):
             if break_def:
                 span = max(1, min(break_def.get("span", 1), len(periods) - period_position))
                 label = break_def.get("label") or "BREAK"
-                row.append(Paragraph(
-                    f"<b>{escape(label)}</b><br/>Break | Duration: {span} {'period' if span == 1 else 'periods'}",
-                    break_style,
-                ))
+                row.append(Paragraph(f"<b>{escape(label)}</b>", break_style))
                 row.extend([""] * (span - 1))
                 if span > 1:
                     table_styles.append(("SPAN", (period_position + 1, row_number), (period_position + span, row_number)))
@@ -130,18 +172,16 @@ def timetable_pdf_response(title, entries, download):
 
             cell_lines = []
             for item in items:
-                entry_type = item.get("entry_type") or "regular"
-                subject = item.get("subject_name") or ("Cancelled" if entry_type == "cancelled" else "Class")
-                lines = [f"<b>{escape(str(subject))}</b>"]
-                if item.get("teacher_name"):
-                    lines.append(f"Teacher: {escape(str(item['teacher_name']))}")
-                if item.get("room"):
-                    lines.append(f"Room: {escape(str(item['room']))}")
-                lines.append(f"Type: {escape(str(entry_type))}")
-                lines.append(f"Duration: {span} {'period' if span == 1 else 'periods'}")
-                if item.get("note"):
-                    lines.append(f"Notes: {escape(str(item['note']))}")
-                cell_lines.append("<br/>".join(lines))
+                entry_type = str(item.get("entry_type") or "regular")
+                normalized_type = entry_type.lower()
+                if normalized_type == "break":
+                    cell_lines.append(escape(str(item.get("note") or "BREAK")))
+                    continue
+                subject = item.get("subject_name")
+                label = str(subject or ("Cancelled" if normalized_type == "cancelled" else "Class"))
+                if normalized_type != "regular" and not (not subject and normalized_type == "cancelled"):
+                    label += f" ({entry_type.title()})"
+                cell_lines.append(f"<b>{escape(label)}</b>")
 
             row.append(Paragraph("<br/><br/>".join(cell_lines) if cell_lines else "—", cell_style))
             row.extend([""] * (span - 1))
@@ -161,12 +201,29 @@ def timetable_pdf_response(title, entries, download):
         hAlign="LEFT",
     )
     timetable.setStyle(TableStyle(table_styles))
-    doc.build([
+    story = [
         Paragraph("TIME TABLE", title_style),
-        Paragraph(escape(title), subtitle_style),
+    ]
+    if class_info:
+        academic_info = (
+            f"<b>Semester:</b> {escape(str(class_info['semester']))}"
+            f"&nbsp;&nbsp;&nbsp;&nbsp; <b>Section:</b> {escape(str(class_info['section']))}"
+            f"&nbsp;&nbsp;&nbsp;&nbsp; <b>Room No.:</b> {escape(str(class_info['room'] or 'N/A'))}"
+        )
+        story.append(Paragraph(academic_info, subtitle_style))
+    else:
+        story.append(Paragraph(escape(title), subtitle_style))
+    story.extend([
         Spacer(1, 2 * mm),
         timetable,
     ])
+    if class_info is not None:
+        story.extend([
+            Spacer(1, 5 * mm),
+            Paragraph("SUBJECT &amp; TEACHER DETAILS", subtitle_style),
+            subject_details_table(subjects),
+        ])
+    doc.build(story)
     buffer.seek(0)
 
     filename = re.sub(r"[^A-Za-z0-9_-]+", "-", f"Time-Table-{title}").strip("-") + ".pdf"
@@ -282,10 +339,12 @@ def student_timetable():
         WHERE t.class_id = ?
         ORDER BY t.day, t.period
     """, (cls["id"],)).fetchall()
+    subjects = class_subject_details(conn, cls)
     conn.close()
     return jsonify({
         "class": row_to_dict(cls),
         "entries": rows_to_list(rows),
+        "subjects": subjects,
     })
 
 
@@ -312,10 +371,13 @@ def student_timetable_pdf():
         WHERE t.class_id = ?
         ORDER BY t.day, t.period
     """, (cls["id"],)).fetchall()
+    subjects = class_subject_details(conn, cls)
     conn.close()
 
     title = f"Semester: {cls['semester']} | Section: {cls['section']}"
-    return timetable_pdf_response(title, rows_to_list(rows), request.args.get("download") == "1")
+    return timetable_pdf_response(
+        title, rows_to_list(rows), request.args.get("download") == "1", cls, subjects,
+    )
 
 
 @app.route("/api/student/notifications")
@@ -992,9 +1054,10 @@ def admin_timetable():
     sql += " ORDER BY t.day, t.period"
     rows = conn.execute(sql, params).fetchall()
     cls = conn.execute("SELECT * FROM classes WHERE id = ?", (class_id,)).fetchone()
+    subjects = class_subject_details(conn, cls) if cls else []
     conn.close()
     entries = rows_to_list(rows)
-    return jsonify({"class": row_to_dict(cls), "entries": entries, "items": entries})
+    return jsonify({"class": row_to_dict(cls), "entries": entries, "items": entries, "subjects": subjects})
 
 
 @app.route("/api/admin/timetable/pdf")
@@ -1017,10 +1080,13 @@ def admin_timetable_pdf():
         WHERE t.class_id = ?
         ORDER BY t.day, t.period
     """, (class_id,)).fetchall()
+    subjects = class_subject_details(conn, cls)
     conn.close()
 
     title = f"Semester: {cls['semester']} | Section: {cls['section']}"
-    return timetable_pdf_response(title, rows_to_list(rows), request.args.get("download") == "1")
+    return timetable_pdf_response(
+        title, rows_to_list(rows), request.args.get("download") == "1", cls, subjects,
+    )
 
 
 @app.route("/api/admin/breaks", methods=["GET", "PUT"])

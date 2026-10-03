@@ -216,10 +216,12 @@ async function renderStudent(params) {
       document.body.classList.add("print-timetable");
       // If `today` param is present, render only today's timetable
       const dayName = new Date().toLocaleDateString(undefined, { weekday: "long" });
+      const timetable = params.today
+        ? renderTimetableForDay(data.entries, dayName)
+        : renderTimetableGrid(data.entries);
       const ttPanel = el("div", { class: "panel print-target student-timetable" }, [
         el("h1", { class: "print-only timetable-print-title" }, "TIME TABLE"),
-        el("h2", { class: "timetable-class" }, `Semester: ${ordinalSemester(data.class.semester)} | Section: ${data.class.section}`),
-        data.class.room ? el("p", { class: "timetable-room" }, `Room: ${data.class.room}`) : null,
+        el("h2", { class: "timetable-class" }, `Semester: ${data.class.semester} | Section: ${data.class.section} | Room No.: ${data.class.room || "N/A"}`),
         el("div", { class: "timetable-actions screen-only" }, [
           el("button", { class: "btn secondary", onclick: () => window.print() }, "Print"),
           el("button", {
@@ -227,7 +229,8 @@ async function renderStudent(params) {
             onclick: () => openPdfExport(`/api/student/timetable/pdf?semester=${data.class.semester}&section=${encodeURIComponent(data.class.section)}`),
           }, "Export PDF"),
         ]),
-        params.today ? renderTimetableForDay(data.entries, dayName) : renderTimetableGrid(data.entries),
+        timetable,
+        renderSubjectTeacherDetails(data.subjects),
       ]);
       app.appendChild(ttPanel);
 
@@ -237,13 +240,6 @@ async function renderStudent(params) {
       app.appendChild(el("div", { class: "panel empty-state" }, e.message));
     }
   }
-}
-
-function ordinalSemester(semester) {
-  const number = Number(semester);
-  const remainder = number % 100;
-  const suffix = remainder >= 11 && remainder <= 13 ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[number % 10] || "th");
-  return `${number}${suffix} Semester`;
 }
 
 function openPdfExport(url) {
@@ -268,16 +264,35 @@ function openPdfExport(url) {
   ]);
 }
 
-function appendPrintDetails(cell, entry, duration, includeContext = false) {
-  const details = [
-    includeContext && Number.isFinite(Number(entry.semester)) && entry.section && `Class: Sem ${entry.semester} | Section ${entry.section}`,
-    includeContext && entry.teacher_name && `Teacher: ${entry.teacher_name}`,
-    includeContext && entry.room && `Room: ${entry.room}`,
-    `Type: ${entry.entry_type || "regular"}`,
-    `Duration: ${duration} ${duration === 1 ? "period" : "periods"}`,
-    entry.note && `Note: ${entry.note}`,
-  ].filter(Boolean).join(" | ");
-  cell.appendChild(el("div", { class: "print-only print-details" }, details));
+function appendPrintDetails(cell, entry) {
+  const type = String(entry.entry_type || "regular");
+  const normalizedType = type.toLowerCase();
+  if (normalizedType === "break") return;
+  const subject = entry.subject_name || (normalizedType === "cancelled" ? "Cancelled" : "—");
+  const label = normalizedType === "regular" || (!entry.subject_name && normalizedType === "cancelled")
+    ? subject
+    : `${subject} (${type.charAt(0).toUpperCase()}${type.slice(1)})`;
+  cell.appendChild(el("div", { class: "print-only print-subject" }, label));
+}
+
+function renderSubjectTeacherDetails(subjects) {
+  const rows = (subjects || []).map(subject => el("tr", {}, [
+    el("td", {}, subject.subject_code || "—"),
+    el("td", {}, subject.subject_name || "—"),
+    el("td", {}, subject.teacher_name || "—"),
+  ]));
+  if (!rows.length) rows.push(el("tr", {}, el("td", { colspan: "3" }, "No subject assignments.")));
+  return el("div", { class: "print-only timetable-subjects" }, [
+    el("h2", {}, "SUBJECT & TEACHER DETAILS"),
+    el("table", {}, [
+      el("thead", {}, el("tr", {}, [
+        el("th", {}, "Subject Code"),
+        el("th", {}, "Subject Name"),
+        el("th", {}, "Subject Teacher"),
+      ])),
+      el("tbody", {}, rows),
+    ]),
+  ]);
 }
 
 function renderTimetableGrid(entries) {
@@ -1142,13 +1157,13 @@ async function adminTimetables(content) {
     ttHolder.innerHTML = "";
     ttHolder.appendChild(el("div", { class: "panel print-target admin-timetable" }, [
       el("h1", { class: "print-only timetable-print-title" }, "TIME TABLE"),
-      el("h2", { class: "timetable-class" }, `Semester: ${ordinalSemester(data.class.semester)} | Section: ${data.class.section}`),
-      data.class.room ? el("p", { class: "timetable-room" }, `Room: ${data.class.room}`) : null,
+      el("h2", { class: "timetable-class" }, `Semester: ${data.class.semester} | Section: ${data.class.section} | Room No.: ${data.class.room || "N/A"}`),
       el("div", { class: "timetable-actions screen-only" }, [
         el("button", { class: "btn secondary", onclick: () => window.print() }, "Print"),
         el("button", { class: "btn secondary", onclick: () => openPdfExport(`/api/admin/timetable/pdf?class_id=${classSel.value}`) }, "Export PDF"),
       ]),
       renderAdminTimetable(data.entries, parseInt(classSel.value), refresh, data.class.semester),
+      renderSubjectTeacherDetails(data.subjects),
     ]));
   };
   classSel.onchange = refresh;
